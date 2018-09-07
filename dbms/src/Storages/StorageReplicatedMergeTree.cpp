@@ -2755,6 +2755,35 @@ bool StorageReplicatedMergeTree::fetchPart(const String & part_name, const Strin
             part_name, part, replaced_parts, nullptr);
     };
 
+    {
+        auto part_info = MergeTreePartInfo::fromPartName(part_name, data.format_version);
+
+        auto new_part_info = part_info;
+        new_part_info.mutation = 0;
+        auto candidate_to_clone = data.getActiveContainingPart(new_part_info);
+        if (candidate_to_clone)
+        {
+            MinimalisticDataPartChecksums candidate_checksums;
+            candidate_checksums.computeTotalChecksums(candidate_to_clone->checksums);
+
+            String checksums_str = getZooKeeper()->get(replica_path + "/parts/" + part_name + "/checksums");
+            auto needed_checksums = MinimalisticDataPartChecksums::deserializeFrom(checksums_str);
+            if (needed_checksums == candidate_checksums)
+            {
+                LOG_TRACE(log, "Found local part " << candidate_to_clone->name << " with the same checksums as " << part_name);
+
+                auto new_part = data.cloneAndLoadDataPart(candidate_to_clone, "tmp_clone_", part_info);
+
+                /// TODO: the same code as below
+                MergeTreeData::Transaction transaction;
+                data.renameTempPartAndReplace(new_part, nullptr, &transaction);
+                checkPartChecksumsAndCommit(transaction, new_part);
+                LOG_TRACE(log, "Cloned part " << part_name << " from " << candidate_to_clone->name);
+                return true;
+            }
+        }
+    }
+
     ReplicatedMergeTreeAddress address(getZooKeeper()->get(replica_path + "/host"));
     auto timeouts = ConnectionTimeouts::getHTTPTimeouts(context.getSettingsRef());
     auto [user, password] = context.getInterserverCredentials();
